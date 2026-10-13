@@ -12,6 +12,7 @@ A plugin for KOReader integration with the highlight saving and read later servi
 - The number of articles downloaded per sync can be limited in the settings menu (default: unlimited).
 - Highlights and notes that are saved in KOReader are exported to Readwise in the same sync process (disabled by default - enable in the settings menu). 
 - Highlights in downloaded Reader articles are attached to the original article in Reader. Other items are exported to Readwise as before.
+- To leave book exports to BookOrbit or another tool, enable **Readwise Reader → Settings → Export highlights from Reader articles only**. This is off by default and applies to both **Advanced sync → Export highlights to Readwise** and export during sync (which still requires **Export highlights at each sync**). Only files recognized by the plugin's Reader document ID in their filename (`[rw-id_ID] Title.html`) are included, even if moved to another folder. Ordinary books, unrecognized or renamed files, and fileless Kindle clippings are skipped. Reader article passages that cannot be attached to Reader still use the existing Readwise fallback. This setting does not remove previously exported book highlights.
 - Very image heavy files will download, but may cause KOReader to crash if the file is very large and your ereader can’t cope with this. Due to the way images are saved and the limitations of HTML files, this is more of an issue than with EPUBs. To mitigate this, there is a setting to allow the user to cap the size of a file, after which further images are not downloaded. This is set to 10MB by default, but may be changed according to the limits of the user’s setup. There is also a toggle to turn off image downloads completely if required.
 
 ## Limitations and Known Issues:
@@ -62,6 +63,16 @@ KOReader has [Linux release](https://github.com/koreader/koreader/wiki/Installat
 3. Check plugin directory `$HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins` - Thanks to [MountainToppish](https://www.reddit.com/r/koreader/comments/1mt7g9x/how_to_add_plugins_to_koreader_installed_from/)
 4. Install the plugin by `cd  $HOME/.var/app/rocks.koreader.KOReader/config/koreader/plugins && ln -s $HOME/<source_path>/readwisereader.koplugin`
 5. Restart KOReader
+
+### Regression tests
+From the repository root, with LuaJIT installed:
+
+```sh
+luajit tests/highlights_test.lua
+luajit tests/covers_test.lua
+```
+
+These use KOReader and HTTP stubs; they do not contact Readwise. The highlight suite covers scope persistence, default exports, manual and sync-time Reader-only exports, moved articles, missing/malformed IDs, Kindle merging, and Reader fallback. Real Kobo verification is still required.
 
 ## Release Rules
 - PRs can only be merged after a maintainer has tested team.
