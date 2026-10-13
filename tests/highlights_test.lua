@@ -145,6 +145,174 @@ local function test(name, run)
     print("ok - " .. name)
 end
 
+local function menuItem(reader, text)
+    local menu = {}
+    reader:addToMainMenu(menu)
+    local function find(items)
+        for _, item in ipairs(items) do
+            if item.text == text then return item end
+            if item.sub_item_table then
+                local found = find(item.sub_item_table)
+                if found then return found end
+            end
+        end
+    end
+    return assert(find(menu.readwisereader.sub_item_table), text)
+end
+
+local function mixedHistory(reader)
+    local article = book({"Article passage"})
+    -- Recognition must work outside the configured download folder.
+    article.file = "/moved/[rw-id_doc-1] Article.html"
+    reader.directory = "/reader"
+    local ordinary = book({"Book passage"})
+    ordinary.file = "/reader/Book.epub"
+    local fileless = book({"Fileless passage"})
+    fileless.file = nil
+    reader.parser = {
+        parseHistory = function()
+            return { article = article, ordinary = ordinary, fileless = fileless }
+        end,
+    }
+    return article, ordinary, fileless
+end
+
+test("Reader-only scope defaults off and persists both toggle states", function()
+    local reader = newReader()
+    eq(reader.export_reader_articles_only, false)
+    eq(reader.export_highlights_at_sync, false)
+    local item = menuItem(reader, "Export highlights from Reader articles only")
+    eq(item.checked_func(), false)
+    item.callback()
+    eq(item.checked_func(), true)
+    eq(stored.readwisereader.export_reader_articles_only, true)
+    eq(newReader().export_reader_articles_only, true)
+    -- Scope must be configurable even when sync-time export is disabled.
+    eq(reader.export_highlights_at_sync, false)
+    item.callback()
+    eq(stored.readwisereader.export_reader_articles_only, false)
+    eq(newReader().export_reader_articles_only, false)
+end)
+
+test("Reader-only scope recognizes IDs rather than folders or titles", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    mixedHistory(reader)
+    for _, file in ipairs({
+        "/reader/[rw-id_] Empty.html",
+        "/reader/[rw-id_doc-2 Missing.html",
+        "/reader/Not [rw-id_doc-3] Reader.html",
+    }) do
+        eq(reader:shouldExportHighlights({ file = file }), false)
+    end
+    local clippings = reader:parseAllBooks()
+    assert(clippings.article)
+    eq(clippings.ordinary, nil)
+    eq(clippings.fileless, nil)
+end)
+
+test("default and explicit off export Reader articles, books and fileless notes", function()
+    for _, explicit in ipairs({false, true}) do
+        stored.readwisereader.reader_highlights = nil
+        if explicit then stored.readwisereader.export_reader_articles_only = false end
+        local reader = newReader()
+        mixedHistory(reader)
+        local reader_calls, legacy_calls = 0, 0
+        reader.api.requestReader = function(_, method, endpoint, payload)
+            eq(payload.parent_id, "doc-1")
+            reader_calls = reader_calls + 1
+            return { id = "highlight-1" }
+        end
+        reader.api.createReadwiseHighlights = function(_, highlights)
+            legacy_calls = legacy_calls + 1
+            eq(#highlights, 1)
+            return {}
+        end
+        eq(reader:exportHighlights(), 3)
+        eq(reader_calls, 1)
+        eq(legacy_calls, 2)
+    end
+end)
+
+test("manual menu export applies Reader-only scope with sync export disabled", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    mixedHistory(reader)
+    -- Connectivity and settings validation are unrelated to export scope.
+    reader.runSyncAction = function(_, action) action() end
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    menuItem(reader, "Export highlights to Readwise").callback()
+    eq(reader.export_highlights_at_sync, false)
+    eq(#http_calls, 1)
+    eq(http_calls[1].body.parent_id, "doc-1")
+    eq(http_calls[1].url, "https://readwise.io/api/v3/save/")
+    contains(messages[#messages], "Exported 1")
+end)
+
+test("sync-time export applies Reader-only scope and allows cleanup", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    reader.export_highlights_at_sync = true
+    mixedHistory(reader)
+    reader.validateSettings = function() return true end
+    local cleanup, archive = 0, 0
+    reader.cleanupArchivedDocuments = function() cleanup = cleanup + 1; return 0 end
+    reader.processFinishedDocuments = function() archive = archive + 1; return 0, 0 end
+    -- Stop after the actual export and cleanup, before downloads.
+    reader.getDocumentList = function() return nil end
+    replies = {{ code = 201, body = { id = "highlight-1" } }}
+    reader:synchronize()
+    eq(#http_calls, 1)
+    eq(http_calls[1].body.parent_id, "doc-1")
+    eq(cleanup, 1)
+    eq(archive, 1)
+end)
+
+test("only excluded books is a successful zero-count export", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    local _, ordinary, fileless = mixedHistory(reader)
+    reader.parser.parseHistory = function() return { ordinary = ordinary, fileless = fileless } end
+    local count, err = reader:exportHighlights()
+    eq(count, 0)
+    eq(err, nil)
+    eq(#http_calls, 0)
+    eq(flushes, 0)
+end)
+
+test("Reader-only scope filters Kindle clippings before merging shared titles", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    local article, _, fileless = mixedHistory(reader)
+    -- A longer fileless clipping must not displace the Reader article.
+    fileless[2] = copy(fileless[1])
+    reader.parser.parseHistory = function() return { shared = article } end
+    reader.parser.parseMyClippings = function() return { shared = fileless, other = fileless } end
+    require("device").isKindle = function() return true end
+    local clippings = reader:parseAllBooks()
+    eq(clippings.shared, article)
+    eq(clippings.other, nil)
+    reader.export_reader_articles_only = false
+    clippings = reader:parseAllBooks()
+    eq(clippings.shared, fileless)
+    eq(clippings.other, fileless)
+    require("device").isKindle = function() return false end
+end)
+
+test("Reader-only scope preserves rejected Reader passage fallback", function()
+    local reader = newReader()
+    reader.export_reader_articles_only = true
+    mixedHistory(reader)
+    replies = {{ code = 400 }, { code = 200, body = {} }}
+    local count, err = reader:exportHighlights()
+    eq(count, 1)
+    eq(err, nil)
+    eq(#http_calls, 2)
+    eq(http_calls[2].url, "https://readwise.io/api/v2/highlights")
+    eq(#http_calls[2].body.highlights, 1)
+    eq(http_calls[2].body.highlights[1].text, "Article passage")
+end)
+
 test("Reader payload preserves text and accepts 201", function()
     local reader = newReader()
     local text = "A ‘quote’ & punctuation.\nA second paragraph."

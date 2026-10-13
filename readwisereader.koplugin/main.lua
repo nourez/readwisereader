@@ -93,6 +93,7 @@ function ReadwiseReader:init()
     -- on by default; `~= false` keeps an explicit opt-out working
     self.archive_finished = settings.archive_finished ~= false
     self.export_highlights_at_sync = settings.export_highlights_at_sync or false
+    self.export_reader_articles_only = settings.export_reader_articles_only or false
     self.last_sync_time = settings.last_sync_time
     
     self.available_tags = settings.available_tags or {}
@@ -417,6 +418,14 @@ function ReadwiseReader:runSyncAction(action)
     end)
 end
 
+function ReadwiseReader:shouldExportHighlights(booknotes)
+    if not self.export_reader_articles_only then
+        return true
+    end
+    local document_id = booknotes.file and self:getDocumentIdFromPath(booknotes.file)
+    return type(document_id) == "string" and document_id ~= ""
+end
+
 function ReadwiseReader:parseAllBooks()
     local clippings = {}
 
@@ -432,14 +441,19 @@ function ReadwiseReader:parseAllBooks()
     -- Parse from history
     local history_clippings = self.parser:parseHistory()
     for title, booknotes in pairs(history_clippings) do
-        clippings[title] = booknotes
+        if self:shouldExportHighlights(booknotes) then
+            clippings[title] = booknotes
+        end
     end
     
     -- Parse from Kindle My Clippings if available
     if Device:isKindle() then
         local kindle_clippings = self.parser:parseMyClippings()
         for title, booknotes in pairs(kindle_clippings) do
-            if clippings[title] == nil or #clippings[title] < #booknotes then
+            -- Filter before merging: a fileless Kindle entry must not replace
+            -- an identified Reader article with the same title.
+            if self:shouldExportHighlights(booknotes)
+                and (clippings[title] == nil or #clippings[title] < #booknotes) then
                 logger.dbg("ReadwiseReader: found new notes in MyClipping", booknotes.title)
                 clippings[title] = booknotes
             end
@@ -555,6 +569,7 @@ function ReadwiseReader:addToMainMenu(menu_items)
                 -- INVARIANT: every item here runs unconditionally. The toggles in
                 -- Settings gate what "Sync now" does; picking an item here is an
                 -- explicit request, so it must not consult the matching toggle.
+                -- The highlight scope setting still applies to manual exports.
                 text = "Advanced sync",
                 sub_item_table = {
                     {
@@ -693,6 +708,17 @@ function ReadwiseReader:addToMainMenu(menu_items)
                         end,
                         callback = function()
                             self.export_highlights_at_sync = not self.export_highlights_at_sync
+                            self:saveSettings()
+                        end,
+                    },
+                    {
+                        text = "Export highlights from Reader articles only",
+                        help_text = "Applies to manual export and export at sync. Only files with the plugin's Reader document ID are included, wherever they are stored. Other books and fileless clippings are skipped, so you can export books with another tool such as BookOrbit. Off by default.",
+                        checked_func = function()
+                            return self.export_reader_articles_only
+                        end,
+                        callback = function()
+                            self.export_reader_articles_only = not self.export_reader_articles_only
                             self:saveSettings()
                         end,
                     },
@@ -2460,6 +2486,7 @@ function ReadwiseReader:saveSettings()
         directory = self.directory,
         archive_finished = self.archive_finished,
         export_highlights_at_sync = self.export_highlights_at_sync,
+        export_reader_articles_only = self.export_reader_articles_only,
         last_sync_time = self.last_sync_time,
         available_tags = self.available_tags,
         excluded_tags = self.excluded_tags,
